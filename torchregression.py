@@ -1,3 +1,4 @@
+import scipy.stats as st
 import torch
 
 
@@ -90,10 +91,12 @@ def regression_summary(model, X, y, robust="none"):
 
     beta, cov, se = compute_se(model, X, y, robust=robust)
     t_stat = beta / se
+    p_values = torch.from_numpy(2 * (1 - st.t.cdf(torch.abs(t_stat), df=n - p)))
     return {
         "beta": beta,
         "se": se,
         "t_stat": t_stat,
+        "p_values": p_values,
         "cov": cov,
         "r2": r2.reshape(1),
         "adj_r2": adj_r2.reshape(1),
@@ -123,6 +126,8 @@ if __name__ == "__main__":
 
         print("\n--- Homoskedastic ---")
         print("SE:", stats_homosked["se"].numpy())
+        print("p-values:", stats_homosked["p_values"].numpy())
 
         print("\n--- Robust (HC3) ---")
         print("SE:", stats_hc3["se"].numpy())
+        print("p-values:", stats_hc3["p_values"].numpy())

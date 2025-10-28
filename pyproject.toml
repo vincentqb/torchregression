@@ -4,6 +4,7 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3"
 ]
+dependencies = ["scipy", "torch"]
 description = "Regression with pytorch."
 name = "torchregression"
 readme = "README.md"
