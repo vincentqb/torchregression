@@ -121,7 +121,7 @@ if __name__ == "__main__":
         print("R²:", stats_homosked["r2"].numpy())
         print("Adjusted R²:", stats_homosked["adj_r2"].numpy())
 
-        print("\n--- Homoskedastic OLS ---")
+        print("\n--- Homoskedastic ---")
         print("SE:", stats_homosked["se"].numpy())
 
         print("\n--- Robust (HC3) ---")
