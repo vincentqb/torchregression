@@ -31,11 +31,11 @@ p-values: [0.0000 0.0025 0.0000]
 Development:
 
 ```
-uv tool run pre-commit install
-uv tool run pre-commit autoupdate
-uv tool run ruff format .
-uv tool run ruff check --fix .
-uv tool run ty
+uvx pre-commit install
+uvx pre-commit autoupdate
+uvx ruff format .
+uvx ruff check --fix .
+uvx ty check
 
 uv venv
 source .venv/bin/activate
