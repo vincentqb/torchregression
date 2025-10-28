@@ -1,5 +1,6 @@
 import scipy.stats as st
 import torch
+from rich.progress import track
 
 
 def make_data(n=200, p=3, noise=1.0, seed=0):
@@ -20,119 +21,183 @@ class LinearRegression(torch.nn.Module):
         return self.linear(x)
 
 
-def train_ols(model, X, y, *, lr=0.05, epochs=2000):
+def train_ols(model, X, y, *, lr=0.05, epochs=10, batch_size=32):
+    """Train OLS using mini-batches"""
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = torch.nn.MSELoss()
-    for _ in range(epochs):
-        optimizer.zero_grad()
-        y_pred = model(X)
-        loss = loss_fn(y_pred, y)
-        loss.backward()
-        optimizer.step()
+    n = len(X)
+    for _ in track(range(epochs), description="Training..."):
+        perm = torch.randperm(n)
+        for i in range(0, n, batch_size):
+            idx = perm[i : i + batch_size]
+            xb, yb = X[idx], y[idx]
+            optimizer.zero_grad()
+            loss = loss_fn(model(xb), yb)
+            loss.backward()
+            optimizer.step()
 
 
-def compute_se(model, X, y, *, robust):
+def compute_se(model, X, y, *, robust="none", batch_size=256):
     """
-    Covariance & Standard Error computation
-    robust: "none" | "HC0" | .. .| "HC5"
+    Covariance & Standard Error computation (batched)
+    robust: "none" | "HC0" | "HC1" | "HC2" | "HC3"
     """
     n, p = X.shape
+    device = X.device
+
     with torch.no_grad():
-        # Prepare design matrix
-        y_hat = model(X)
-        resid = y - y_hat
+        # Storage for accumulated matrices
+        add_bias = model.linear.bias is not None
+        p_eff = p + (1 if add_bias else 0)
 
-        if model.linear.bias is None:
-            X_design = X
-            beta = model.linear.weight.flatten()
-        else:
-            X_design = torch.cat([X, torch.ones(n, 1)], dim=1)
-            beta = torch.cat([model.linear.weight.flatten(), model.linear.bias])
+        XtX = torch.zeros((p_eff, p_eff), device=device)
+        rss = 0.0
+        n_obs = 0
 
-        # (X'X)^(-1)
-        XtX_inv = torch.inverse(X_design.T @ X_design)
+        # First pass: accumulate XtX and RSS
+        for i in range(0, n, batch_size):
+            xb = X[i : i + batch_size]
+            yb = y[i : i + batch_size]
+            nb = len(xb)
+
+            y_hat = model(xb)
+            resid = yb - y_hat
+            n_obs += nb
+            rss += (resid.T @ resid).item()
+
+            if add_bias:
+                Xb = torch.cat([xb, torch.ones(nb, 1, device=device)], dim=1)
+            else:
+                Xb = xb
+
+            XtX += Xb.T @ Xb
+
+        XtX_inv = torch.inverse(XtX)
 
         if robust == "none":
-            # Homoskedastic OLS
-            sigma2 = (resid.T @ resid) / (n - p)
+            sigma2 = rss / (n_obs - p_eff)
             cov_beta = sigma2 * XtX_inv
 
         else:
-            # Heteroskedasticity-consistent covariance
-            # HC0: X' diag(e_i^2) X
-            # HC1: scale by n/(n - p)
-            # HC3: divide by (1 - h_ii)^2, where h = X(X'X)^(-1)X'
-            Xh = X_design @ XtX_inv @ X_design.T
-            h_ii = torch.diag(Xh)
+            # Second pass for heteroskedasticity-consistent covariance
+            cov_beta = torch.zeros_like(XtX)
+            for i in range(0, n, batch_size):
+                xb = X[i : i + batch_size]
+                yb = y[i : i + batch_size]
+                nb = len(xb)
 
-            if robust == "HC0":
-                scale = torch.ones_like(h_ii)
-            elif robust == "HC1":
-                scale = n / (n - p) * torch.ones_like(h_ii)
-            elif robust == "HC2":
-                scale = 1.0 / (1 - h_ii)
-            elif robust == "HC3":
-                scale = 1.0 / (1 - h_ii) ** 2
-            elif robust == "HC4":
-                h_mean = h_ii.mean()
-                delta_i = torch.minimum(torch.tensor(4.0), h_ii / h_mean)
-                scale = 1.0 / (1 - h_ii) ** delta_i
-            elif robust == "HC5":
-                h_mean = h_ii.mean()
-                delta_i = torch.minimum(torch.tensor(4.0), (h_ii / h_mean) ** 0.7)
-                scale = 1.0 / (1 - h_ii) ** delta_i
-            else:
-                raise ValueError("robust must be one of 'none', 'HC0'...'HC5'")
+                y_hat = model(xb)
+                resid = yb - y_hat
 
-            # Compute X' diag(e_i^2 * scale_i) X
-            w = (resid.squeeze() ** 2 * scale).view(-1, 1)
-            X_weighted = X_design * torch.sqrt(w)
-            cov_beta = XtX_inv @ (X_weighted.T @ X_weighted) @ XtX_inv
+                if add_bias:
+                    Xb = torch.cat([xb, torch.ones(nb, 1, device=device)], dim=1)
+                else:
+                    Xb = xb
+
+                Xh = Xb @ XtX_inv @ Xb.T
+                h_ii = torch.diag(Xh)
+
+                if robust == "HC0":
+                    scale = torch.ones_like(h_ii)
+                elif robust == "HC1":
+                    scale = n / (n - p_eff) * torch.ones_like(h_ii)
+                elif robust == "HC2":
+                    scale = 1.0 / (1 - h_ii)
+                elif robust == "HC3":
+                    scale = 1.0 / (1 - h_ii) ** 2
+                else:
+                    raise ValueError(f"Unsupported robust type {robust}")
+
+                w = (resid.squeeze() ** 2 * scale).view(-1, 1)
+                X_weighted = Xb * torch.sqrt(w)
+                cov_beta += X_weighted.T @ X_weighted
+
+            cov_beta = XtX_inv @ cov_beta @ XtX_inv
+
+        # Extract coefficients and SE
+        if add_bias:
+            beta = torch.cat([model.linear.weight.flatten(), model.linear.bias])
+        else:
+            beta = model.linear.weight.flatten()
 
         se = torch.sqrt(torch.diag(cov_beta))
-        return beta, cov_beta, se
+
+        # For completeness, collect all residuals
+        resid_full = []
+        for i in range(0, n, batch_size):
+            xb = X[i : i + batch_size]
+            yb = y[i : i + batch_size]
+            resid_full.append(yb - model(xb))
+        resid_full = torch.cat(resid_full)
+
+        return beta, cov_beta, se, resid_full
 
 
-def regression_summary(model, X, y, *, robust="none"):
-    # Compute regression summary
-    n, p = X.shape
-    with torch.no_grad():
-        y_hat = model(X)
-        resid = y - y_hat
-        ssr = torch.sum((y_hat - y.mean()) ** 2)
-        sst = torch.sum((y - y.mean()) ** 2)
+def regression_summary(model, X, y, *, robust="none", batch_size=None):
+    """
+    Regression summary supporting batched evaluation.
+    X: [B, n, p] or [n, p]
+    y: [B, n, 1] or [n, 1]
+    """
+    # Ensure batch dimension
+    if X.dim() == 2:
+        X = X.unsqueeze(0)
+        y = y.unsqueeze(0)
+
+    B, n, p = X.shape
+
+    # Storage for results
+    betas, covs, ses, t_stats, p_vals, r2s, adj_r2s, residuals_list = [], [], [], [], [], [], [], []
+
+    for b in range(B):
+        Xb, yb = X[b], y[b]
+
+        beta, cov, se, resid = compute_se(model, Xb, yb, robust=robust, batch_size=batch_size)
+        y_hat = model(Xb)
+        ssr = torch.sum((y_hat - yb.mean()) ** 2)
+        sst = torch.sum((yb - yb.mean()) ** 2)
         r2 = ssr / sst
         adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1)
+        t_stat = beta / se
+        p_value = torch.from_numpy(2 * (1 - st.t.cdf(torch.abs(t_stat).detach().numpy(), df=n - p)))
 
-    beta, cov, se = compute_se(model, X, y, robust=robust)
-    t_stat = beta / se
-    p_values = torch.from_numpy(2 * (1 - st.t.cdf(torch.abs(t_stat).detach().numpy(), df=n - p)))
+        # Collect
+        betas.append(beta)
+        covs.append(cov)
+        ses.append(se)
+        t_stats.append(t_stat)
+        p_vals.append(p_value)
+        r2s.append(r2)
+        adj_r2s.append(adj_r2)
+        residuals_list.append(resid)
+
+    # Stack results
     return {
-        "beta": beta,
-        "se": se,
-        "t_stat": t_stat,
-        "p_values": p_values,
-        "cov": cov,
-        "r2": r2.reshape(1),
-        "adj_r2": adj_r2.reshape(1),
-        "residuals": resid.squeeze(),
+        "beta": torch.stack(betas),
+        "se": torch.stack(ses),
+        "t_stat": torch.stack(t_stats),
+        "p_values": torch.stack(p_vals),
+        "cov": torch.stack(covs),
+        "r2": torch.stack(r2s),
+        "adj_r2": torch.stack(adj_r2s),
+        "residuals": torch.stack(residuals_list),
     }
 
 
 if __name__ == "__main__":
     import numpy as np
 
-    X, y, beta_true = make_data(n=200, p=3)
+    X, y, beta_true = make_data(n=20_000, p=3)
 
     model = LinearRegression(X.shape[1], bias=False)
-    train_ols(model, X, y)
-    stats_homosked = regression_summary(model, X, y, robust="none")
+    train_ols(model, X, y, batch_size=32, epochs=50)
 
+    stats_homosked = regression_summary(model, X, y, robust="none", batch_size=64)
     robust = "HC3"
-    stats = regression_summary(model, X, y, robust=robust)
+    stats = regression_summary(model, X, y, robust=robust, batch_size=64)
 
     with np.printoptions(precision=4, floatmode="fixed", suppress=False):
-        print("--- Ground Truth ---")
+        print("\n--- Ground Truth ---")
         print("β̂:", beta_true.flatten().detach().numpy())
 
         print("\n--- OLS ---")
