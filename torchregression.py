@@ -31,10 +31,10 @@ def train_ols(model, X, y, lr=0.05, epochs=2000):
         optimizer.step()
 
 
-def compute_se(model, X, y, robust="none"):
+def compute_se(model, X, y, *, robust):
     """
     Covariance & Standard Error computation
-    robust: "none" | "HC0" | "HC1" | "HC3"
+    robust: "none" | "HC0" | .. .| "HC5"
     """
     n, p = X.shape
     with torch.no_grad():
@@ -64,10 +64,20 @@ def compute_se(model, X, y, robust="none"):
                 scale = torch.ones_like(h_ii)
             elif robust == "HC1":
                 scale = n / (n - p) * torch.ones_like(h_ii)
+            elif robust == "HC2":
+                scale = 1.0 / (1 - h_ii)
             elif robust == "HC3":
                 scale = 1.0 / (1 - h_ii) ** 2
+            elif robust == "HC4":
+                h_mean = h_ii.mean()
+                delta_i = torch.minimum(torch.tensor(4.0), h_ii / h_mean)
+                scale = 1.0 / (1 - h_ii) ** delta_i
+            elif robust == "HC5":
+                h_mean = h_ii.mean()
+                delta_i = torch.minimum(torch.tensor(4.0), (h_ii / h_mean) ** 0.7)
+                scale = 1.0 / (1 - h_ii) ** delta_i
             else:
-                raise ValueError("robust must be one of 'none', 'HC0', 'HC1', 'HC3'")
+                raise ValueError("robust must be one of 'none', 'HC0'...'HC5'")
 
             # Compute X' diag(e_i^2 * scale_i) X
             w = (resid.squeeze() ** 2 * scale).view(-1, 1)
@@ -107,13 +117,14 @@ def regression_summary(model, X, y, robust="none"):
 if __name__ == "__main__":
     import numpy as np
 
-    X, Y, beta_true = make_data(n=200, p=3)
+    X, y, beta_true = make_data(n=200, p=3)
 
     model = LinearRegression(X.shape[1])
-    train_ols(model, X, Y)
+    train_ols(model, X, y)
+    stats_homosked = regression_summary(model, X, y, robust="none")
 
-    stats_homosked = regression_summary(model, X, Y, robust="none")
-    stats_hc3 = regression_summary(model, X, Y, robust="HC3")
+    robust = "HC3"
+    stats = regression_summary(model, X, y, robust=robust)
 
     with np.printoptions(precision=4, floatmode="fixed", suppress=False):
         print("--- Ground Truth ---")
@@ -128,6 +139,6 @@ if __name__ == "__main__":
         print("SE:", stats_homosked["se"].numpy())
         print("p-values:", stats_homosked["p_values"].numpy())
 
-        print("\n--- Robust (HC3) ---")
-        print("SE:", stats_hc3["se"].numpy())
-        print("p-values:", stats_hc3["p_values"].numpy())
+        print(f"\n--- Robust ({robust}) ---")
+        print("SE:", stats["se"].numpy())
+        print("p-values:", stats["p_values"].numpy())
