@@ -1,6 +1,9 @@
 import scipy.stats as st
 import torch
+from rich.box import HORIZONTALS
+from rich.console import Console
 from rich.progress import track
+from rich.table import Table
 
 
 def make_data(n=200, p=3, noise=1.0, seed=0):
@@ -184,10 +187,21 @@ def regression_summary(model, X, y, *, robust="none", batch_size=None):
     }
 
 
-if __name__ == "__main__":
-    import numpy as np
+def pretty_summary(d):
+    table = Table(box=HORIZONTALS)
+    table.add_column("Key", justify="right")
+    table.add_column("Values", justify="center")
 
-    X, y, beta_true = make_data(n=20_000, p=3)
+    for key, values in d.items():
+        values = values.flatten().detach().numpy().tolist()
+        table.add_row(key, "   ".join(f"{value:+1.4f}" for value in values))
+
+    console = Console()
+    console.print(table)
+
+
+if __name__ == "__main__":
+    X, y, beta_true = make_data(n=200, p=3)
 
     model = LinearRegression(X.shape[1], bias=False)
     train_ols(model, X, y, batch_size=32, epochs=50)
@@ -196,19 +210,17 @@ if __name__ == "__main__":
     robust = "HC3"
     stats = regression_summary(model, X, y, robust=robust, batch_size=64)
 
-    with np.printoptions(precision=4, floatmode="fixed", suppress=False):
-        print("\n--- Ground Truth ---")
-        print("β̂:", beta_true.flatten().detach().numpy())
-
-        print("\n--- OLS ---")
-        print("β̂:", stats_homosked["beta"].detach().numpy())
-        print("R²:", stats_homosked["r2"].detach().numpy())
-        print("Adjusted R²:", stats_homosked["adj_r2"].detach().numpy())
-
-        print("\n--- Homoskedastic ---")
-        print("SE:", stats_homosked["se"].detach().numpy())
-        print("p-values:", stats_homosked["p_values"].detach().numpy())
-
-        print(f"\n--- Robust ({robust}) ---")
-        print("SE:", stats["se"].detach().numpy())
-        print("p-values:", stats["p_values"].detach().numpy())
+    pretty_summary(
+        {
+            "Ground Truth β": beta_true,
+            "Estimated β̂": stats_homosked["beta"],
+            "Homoskedastic SE σ̂": stats_homosked["se"],
+            "Homoskedastic p value": stats_homosked["p_values"],
+            # "Homoskedastic t statistics": stats_homosked["t_stat"],
+            f"Robust ({robust}) SE σ̂:": stats["se"],
+            f"Robust ({robust}) p value": stats["p_values"],
+            # f"Robust ({robust}) t statistics": stats_homosked["t_stat"],
+            "R²": stats_homosked["r2"],
+            "Adjusted R²": stats_homosked["adj_r2"],
+        }
+    )
